@@ -44,19 +44,19 @@ func main() {
 
 	pgPool, err := newPostgresPool(ctx, cfg.PostgresURL)
 	if err != nil {
-		logger.Error("falha ao conectar no postgres", "error", err)
+		logger.Error("failed to connect to postgres", "error", err)
 		os.Exit(1)
 	}
 	defer pgPool.Close()
 
 	redisClient, err := newRedisClient(ctx, cfg)
 	if err != nil {
-		logger.Error("falha ao conectar no redis", "error", err)
+		logger.Error("failed to connect to redis", "error", err)
 		os.Exit(1)
 	}
 	defer func() {
 		if err := redisClient.Close(); err != nil {
-			logger.Warn("falha ao fechar redis", "error", err)
+			logger.Warn("failed to close redis", "error", err)
 		}
 	}()
 
@@ -71,7 +71,7 @@ func main() {
 	worker := usecase.NewWorkerService(jobRepo, idempotencyStore, workerCfg)
 
 	logger.Info(
-		"worker iniciado",
+		"worker started",
 		"poll_interval", cfg.PollInterval.String(),
 		"max_concurrency", cfg.MaxConcurrency,
 		"base_retry_delay", cfg.BaseRetryDelay.String(),
@@ -79,9 +79,9 @@ func main() {
 
 	run(ctx, logger, worker, cfg.PollInterval)
 
-	logger.Info("encerrando worker, aguardando jobs em andamento")
+	logger.Info("shutting down worker, waiting for in-flight jobs")
 	worker.Stop()
-	logger.Info("worker finalizado")
+	logger.Info("worker finished")
 }
 
 func run(
@@ -139,7 +139,7 @@ func loadConfig() (config, error) {
 
 	postgresURL := os.Getenv("DATABASE_URL")
 	if postgresURL == "" {
-		return config{}, errors.New("DATABASE_URL é obrigatório")
+		return config{}, errors.New("DATABASE_URL is required")
 	}
 
 	return config{
@@ -233,7 +233,7 @@ func getEnvDuration(key string, fallback time.Duration) (time.Duration, error) {
 
 	parsed, err := time.ParseDuration(value)
 	if err != nil {
-		return 0, fmt.Errorf("%s inválido: %w", key, err)
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
 	}
 
 	return parsed, nil
@@ -250,6 +250,6 @@ func parseLogLevel(value string) (slog.Level, error) {
 	case "error":
 		return slog.LevelError, nil
 	default:
-		return 0, fmt.Errorf("LOG_LEVEL inválido: %s", value)
+		return 0, fmt.Errorf("invalid LOG_LEVEL: %s", value)
 	}
 }

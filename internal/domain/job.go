@@ -40,20 +40,20 @@ type ScheduledJob struct {
 	UpdatedAt        time.Time
 }
 
-// CanRetry verifica se o job ainda pode ser tentado
+// CanRetry checks if the job can still be retried
 func (j *ScheduledJob) CanRetry() bool {
 	return j.AttemptCount < j.MaxAttempts && j.Status != StatusCancelled
 }
 
-// CalculateNextRetry aplica Exponential Backoff com Jitter
+// CalculateNextRetry applies Exponential Backoff with Jitter
 func (j *ScheduledJob) CalculateNextRetry(baseDelay time.Duration) time.Time {
 	// n = AttemptCount
 	// delay = base * 2^n
 	expFactor := math.Pow(2, float64(j.AttemptCount))
 	delay := float64(baseDelay) * expFactor
 
-	// Adicionando Jitter (variância de até 20% do delay atual)
-	// Isso evita que múltiplos jobs "acordem" ao mesmo tempo.
+	// Adding Jitter (variance of up to 20% of the current delay)
+	// This prevents multiple jobs from "waking up" at the same time.
 	jitterRange := delay * 0.2
 	randomJitter := (rand.Float64() * jitterRange)
 

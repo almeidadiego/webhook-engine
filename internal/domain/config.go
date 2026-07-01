@@ -2,15 +2,15 @@ package domain
 
 import "time"
 
-// WorkerConfig define as configurações operacionais do Worker.
-// Localizado no domínio pois dita o comportamento da regra de negócio.
+// WorkerConfig defines the operational settings for a Worker.
+// Located in the domain as it dictates business rule behavior.
 type WorkerConfig struct {
-	// MaxConcurrency define o número de goroutines simultâneas (semáforo).
+	// MaxConcurrency defines the number of concurrent goroutines (semaphore).
 	MaxConcurrency int
 
-	// BaseRetryDelay é o tempo inicial para o cálculo de exponential backoff.
+	// BaseRetryDelay is the initial delay for exponential backoff calculation.
 	BaseRetryDelay time.Duration
 
-	// BatchSize define quantos jobs o worker tenta buscar do banco por ciclo.
+	// BatchSize defines how many jobs the worker tries to fetch from the database per cycle.
 	BatchSize int
 }

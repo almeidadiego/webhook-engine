@@ -34,7 +34,7 @@ func NewWorkerService(
 		cache:    cache,
 		workerID: uuid.New(),
 		config:   cfg,
-		// O semáforo limita a concorrência global desta instância
+		// The semaphore limits global concurrency for this instance
 		semaphore: make(chan struct{}, cfg.MaxConcurrency),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -42,9 +42,9 @@ func NewWorkerService(
 	}
 }
 
-// ExecuteCycle busca e dispara jobs pendentes
+// ExecuteCycle fetches and dispatches pending jobs
 func (s *WorkerService) ExecuteCycle(ctx context.Context) {
-	slog.Debug("iniciando ciclo de busca", "worker_id", s.workerID)
+	slog.Debug("starting fetch cycle", "worker_id", s.workerID)
 
 	batchSize := s.config.BatchSize
 	if batchSize <= 0 {
@@ -53,7 +53,7 @@ func (s *WorkerService) ExecuteCycle(ctx context.Context) {
 
 	jobs, err := s.repo.FetchNextPending(ctx, batchSize)
 	if err != nil {
-		slog.Error("falha ao buscar jobs", "error", err)
+		slog.Error("failed to fetch jobs", "error", err)
 		return
 	}
 
@@ -62,7 +62,7 @@ func (s *WorkerService) ExecuteCycle(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case s.semaphore <- struct{}{}:
-			// Ocupamos uma vaga no semáforo antes de tentar o Claim no banco
+			// We occupy a slot in the semaphore before attempting to Claim in the database
 			s.wg.Add(1)
 			go func(j *domain.ScheduledJob) {
 				defer func() {
@@ -76,28 +76,28 @@ func (s *WorkerService) ExecuteCycle(ctx context.Context) {
 }
 
 func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
-	// 1. Claim no Postgres (Garante que este worker é o dono do registro)
+	// 1. Claim in Postgres (Ensures this worker is the record owner)
 	if err := s.repo.Claim(ctx, job.ID, s.workerID); err != nil {
 		return
 	}
 
-	slog.Info("job capturado", "job_id", job.ID, "url", job.URL)
+	slog.Info("job claimed", "job_id", job.ID, "url", job.URL)
 
-	// 2. Lock de Ocupação no Redis (5 minutos)
-	// Se outro worker tentar o mesmo Job ou mesma chave de idempotência, ele barra aqui.
+	// 2. Occupancy Lock in Redis (5 minutes)
+	// If another worker tries the same Job or the same idempotency key, it stops here.
 	isDuplicate, err := s.cache.CheckAndSet(ctx, job.IdempotencyKey, 5*time.Minute)
 
 	if err != nil {
-		slog.Error("erro ao acessar redis", "job_id", job.ID, "error", err)
-		return // Falha de infra: paramos para não arriscar duplicidade
+		slog.Error("error accessing redis", "job_id", job.ID, "error", err)
+		return // Infrastructure failure: we stop to avoid risking duplication
 	}
 
 	if isDuplicate {
-		slog.Warn("idempotência: job já processado ou em andamento", "key", job.IdempotencyKey)
+		slog.Warn("idempotency: job already processed or in progress", "key", job.IdempotencyKey)
 		return
 	}
 
-	// 3. Preparação do registro de execução
+	// 3. Prepare execution record
 	execution := &domain.ExecutionRecord{
 		JobID:      job.ID,
 		AttemptNum: job.AttemptCount + 1,
@@ -105,30 +105,30 @@ func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
 		WorkerID:   &s.workerID,
 	}
 
-	// 4. Executa o Webhook (O momento da verdade)
+	// 4. Execute the Webhook (The moment of truth)
 	resp, err := s.sendRequest(ctx, job)
 
-	// 5. Gestão do Ciclo de Vida da Idempotência (Redis)
+	// 5. Idempotency Lifecycle Management (Redis)
 	s.manageIdempotencyState(ctx, job.IdempotencyKey, resp, err)
 
-	// 6. Finaliza e persiste o resultado no Banco (Postgres)
+	// 6. Finalize and persist the result in the Database (Postgres)
 	s.handleCompletion(ctx, job, resp, err, execution)
 }
 
 // manageIdempotencyState decide se mantém ou remove a trava no Redis
 func (s *WorkerService) manageIdempotencyState(ctx context.Context, key string, resp *http.Response, err error) {
-	// Se foi sucesso (2xx), transformamos o lock de 5min em selo de 24h
+	// On success (2xx), we transform the 5min lock into a 24h seal
 	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if err := s.cache.UpdateTTL(ctx, key, 24*time.Hour); err != nil {
-			slog.Error("erro ao estender TTL de idempotência", "key", key, "error", err)
+			slog.Error("error extending idempotency TTL", "key", key, "error", err)
 		}
 		return
 	}
 
-	// Se houve erro de rede ou status >= 400, liberamos a chave para o próximo retry
-	// Se o Delete falhar, o TTL de 5 min original do CheckAndSet é o nosso fallback.
+	// On network error or status >= 400, we release the key for the next retry
+	// If Delete fails, the original 5 min TTL from CheckAndSet is our fallback.
 	if err := s.cache.Delete(ctx, key); err != nil {
-		slog.Warn("falha ao deletar lock do redis (esperando TTL)", "key", key, "error", err)
+		slog.Warn("failed to delete redis lock (waiting for TTL)", "key", key, "error", err)
 	}
 }
 
@@ -169,29 +169,29 @@ func (s *WorkerService) handleCompletion(ctx context.Context, job *domain.Schedu
 		if job.CanRetry() {
 			job.Status = domain.StatusPending
 			job.ScheduleAt = job.CalculateNextRetry(s.config.BaseRetryDelay)
-			slog.Warn("job falhou, agendando retentativa", "job_id", job.ID, "next_attempt", job.ScheduleAt)
+			slog.Warn("job failed, scheduling retry", "job_id", job.ID, "next_attempt", job.ScheduleAt)
 		} else {
 			job.Status = domain.StatusFailed
-			slog.Error("job falhou definitivamente", "job_id", job.ID, "attempts", job.AttemptCount)
+			slog.Error("job failed permanently", "job_id", job.ID, "attempts", job.AttemptCount)
 		}
 	} else {
 		job.Status = domain.StatusCompleted
 		job.LastResponseCode = &resp.StatusCode
 		exec.ResponseStatusCode = &resp.StatusCode
-		slog.Info("job concluído com sucesso", "job_id", job.ID)
+		slog.Info("job completed successfully", "job_id", job.ID)
 	}
 
-	// Persistência final
+	// Final persistence
 	if err := s.repo.Update(ctx, job); err != nil {
-		slog.Error("erro ao atualizar job no banco", "job_id", job.ID, "error", err)
+		slog.Error("error updating job in the database", "job_id", job.ID, "error", err)
 	}
 	if err := s.repo.SaveExecution(ctx, exec); err != nil {
-		slog.Error("erro ao salvar histórico de execução", "job_id", job.ID, "error", err)
+		slog.Error("error saving execution history", "job_id", job.ID, "error", err)
 	}
 }
 
-// Stop aguarda a finalização de tarefas em andamento
+// Stop waits for in-flight tasks to finish
 func (s *WorkerService) Stop() {
-	slog.Info("aguardando finalização de webhooks em andamento...")
+	slog.Info("waiting for in-flight webhooks to finish...")
 	s.wg.Wait()
 }

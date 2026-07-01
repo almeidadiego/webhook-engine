@@ -11,7 +11,7 @@ import (
 type Config struct {
 	DBURL    string
 	RedisURL string
-	Worker   domain.WorkerConfig // A config do domínio embutida aqui
+	Worker   domain.WorkerConfig // Domain config embedded here
 }
 
 func Load() *Config {
@@ -22,8 +22,8 @@ func Load() *Config {
 		RedisURL: os.Getenv("REDIS_URL"),
 		Worker: domain.WorkerConfig{
 			MaxConcurrency: maxConn,
-			// BatchSize: buscamos o dobro da capacidade para garantir que
-			// o worker sempre tenha trabalho enquanto outros jobs estão em IO
+			// BatchSize: we fetch double the capacity to ensure
+			// the worker always has work while other jobs are in IO
 			BatchSize:      maxConn * 2,
 			BaseRetryDelay: time.Duration(getEnvInt("RETRY_DELAY_SEC", 10)) * time.Second,
 		},

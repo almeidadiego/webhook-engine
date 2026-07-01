@@ -18,7 +18,7 @@ func NewPostgresJobRepository(pool *pgxpool.Pool) *PostgresJobRepository {
 	return &PostgresJobRepository{pool: pool}
 }
 
-// FetchNextPending busca candidatos, mas NÃO os trava ainda.
+// FetchNextPending retrieves candidates but does NOT lock them yet.
 func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, limit int) ([]*domain.ScheduledJob, error) {
 	query := `
 		SELECT id, idempotency_key, url, http_method, request_headers, request_body, attempt_count, max_attempts
@@ -48,7 +48,7 @@ func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, limit int)
 	return jobs, nil
 }
 
-// Claim tenta travar o job especificamente para este worker.
+// Claim attempts to lock the job specifically for this worker.
 func (r *PostgresJobRepository) Claim(ctx context.Context, jobID uuid.UUID, workerID uuid.UUID) error {
 	query := `
 		UPDATE scheduled_jobs
@@ -65,13 +65,13 @@ func (r *PostgresJobRepository) Claim(ctx context.Context, jobID uuid.UUID, work
 	}
 
 	if res.RowsAffected() == 0 {
-		return domain.ErrJobAlreadyClaimed // Você precisaria definir esse erro no domínio
+		return domain.ErrJobAlreadyClaimed // You would need to define this error in the domain
 	}
 
 	return nil
 }
 
-// Update salva o estado final após a tentativa
+// Update saves the final state after the attempt
 func (r *PostgresJobRepository) Update(ctx context.Context, job *domain.ScheduledJob) error {
 	query := `
 		UPDATE scheduled_jobs
@@ -87,7 +87,7 @@ func (r *PostgresJobRepository) Update(ctx context.Context, job *domain.Schedule
 	return err
 }
 
-// SaveExecution registra o histórico na tabela de auditoria
+// SaveExecution records history in the audit table
 func (r *PostgresJobRepository) SaveExecution(ctx context.Context, exec *domain.ExecutionRecord) error {
 	query := `
 		INSERT INTO job_executions (job_id, attempt_num, started_at, ended_at, duration_ms, response_status_code, error_message, worker_id)

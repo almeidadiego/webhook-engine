@@ -7,31 +7,31 @@ import (
 	"github.com/google/uuid"
 )
 
-// JobRepository define como persistimos os jobs
+// JobRepository defines how we persist jobs
 type JobRepository interface {
-	// Busca jobs prontos para execução (pending e schedule_at <= agora)
+	// FetchNextPending retrieves jobs ready for execution (pending and schedule_at <= now)
 	FetchNextPending(ctx context.Context, limit int) ([]*ScheduledJob, error)
 
-	// Marca o job como 'processing', define o worker_id e started_at
-	// Aqui você usaria o "FOR UPDATE SKIP LOCKED" que discutimos
+	// Claim marks the job as 'processing', sets worker_id and started_at
+	// Here you would use "FOR UPDATE SKIP LOCKED" as discussed
 	Claim(ctx context.Context, jobID uuid.UUID, workerID uuid.UUID) error
 
-	// Salva o estado final ou intermediário (sucesso, falha ou reagendamento)
-	// Atualiza status, attempt_count, schedule_at e last_error_message
+	// Update saves the final or intermediate state (success, failure, or reschedule)
+	// Updates status, attempt_count, schedule_at, and last_error_message
 	Update(ctx context.Context, job *ScheduledJob) error
 
-	// Para o histórico detalhado na tabela job_executions
+	// SaveExecution saves detailed history to the job_executions table
 	SaveExecution(ctx context.Context, exec *ExecutionRecord) error
 }
 
 type IdempotencyStore interface {
-	// CheckAndSet tenta gravar a chave. Retorna true se já existia (duplicado).
-	// O ttl define quanto tempo esse "lock" inicial vai durar.
+	// CheckAndSet attempts to write the key. Returns true if it already exists (duplicate).
+	// The ttl defines how long this initial "lock" will last.
 	CheckAndSet(ctx context.Context, key string, ttl time.Duration) (bool, error)
 
-	// UpdateTTL estende a vida da chave (ex: de 1 min para 24h após sucesso)
+	// UpdateTTL extends the key's lifetime (e.g., from 1 min to 24h after success)
 	UpdateTTL(ctx context.Context, key string, ttl time.Duration) error
 
-	// Delete remove a chave (usado em caso de falha para liberar o retry)
+	// Delete removes the key (used on failure to allow retry)
 	Delete(ctx context.Context, key string) error
 }
