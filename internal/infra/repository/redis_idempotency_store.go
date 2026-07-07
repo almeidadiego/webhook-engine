@@ -19,20 +19,25 @@ func NewRedisIdempotencyStore(client *redis.Client) *RedisIdempotencyStore {
 }
 
 func (s *RedisIdempotencyStore) CheckAndSet(ctx context.Context, key string, ttl time.Duration) (bool, error) {
-	cmd := s.Client.SetArgs(ctx, "idemp:"+key, "p", redis.SetArgs{
-		Mode: "NX",
-		TTL:  ttl,
-	})
+	cmd := s.Client.SetArgs(
+		ctx,
+		"idemp:"+key,
+		"p",
+		redis.SetArgs{
+			Mode: "NX",
+			TTL:  ttl,
+		},
+	)
 
 	if err := cmd.Err(); err != nil {
 		if errors.Is(err, redis.Nil) {
-			return true, nil // já existia
+			return true, nil // already exists
 		}
 
-		return false, err // erro real
+		return false, err // real error
 	}
 
-	return false, nil // gravou com sucesso
+	return false, nil // successfully written
 }
 
 func (s *RedisIdempotencyStore) UpdateTTL(ctx context.Context, key string, ttl time.Duration) error {

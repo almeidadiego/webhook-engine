@@ -9,11 +9,15 @@ import (
 
 // JobRepository defines how we persist jobs
 type JobRepository interface {
+	// Insert creates a new scheduled job. Returns ErrIdempotencyKeyExists
+	// if a job with the same tenant_id + idempotency_key already exists.
+	// On conflict, the existing job is returned alongside the error.
+	Insert(ctx context.Context, job *ScheduledJob) (*ScheduledJob, error)
+
 	// FetchNextPending retrieves jobs ready for execution (pending and schedule_at <= now)
 	FetchNextPending(ctx context.Context, limit int) ([]*ScheduledJob, error)
 
 	// Claim marks the job as 'processing', sets worker_id and started_at
-	// Here you would use "FOR UPDATE SKIP LOCKED" as discussed
 	Claim(ctx context.Context, jobID uuid.UUID, workerID uuid.UUID) error
 
 	// Update saves the final or intermediate state (success, failure, or reschedule)

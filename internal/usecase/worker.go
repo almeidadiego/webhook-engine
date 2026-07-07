@@ -77,7 +77,7 @@ func (s *WorkerService) ExecuteCycle(ctx context.Context) {
 
 func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
 	// 1. Claim in Postgres (Ensures this worker is the record owner)
-	if err := s.repo.Claim(ctx, job.ID, s.workerID); err != nil {
+	if err := s.repo.Claim(ctx, s.workerID, job.ID); err != nil {
 		return
 	}
 

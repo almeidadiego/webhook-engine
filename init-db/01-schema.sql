@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     last_error_message TEXT,
     last_response_body TEXT,
     
-    idempotency_key VARCHAR(255) UNIQUE NOT NULL,
+    idempotency_key VARCHAR(255) NOT NULL,
+    
+    CONSTRAINT uq_tenant_idempotency UNIQUE (tenant_id, idempotency_key),
     
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
