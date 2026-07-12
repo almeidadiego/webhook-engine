@@ -66,6 +66,7 @@ func main() {
 	workerCfg := domain.WorkerConfig{
 		MaxConcurrency: cfg.MaxConcurrency,
 		BaseRetryDelay: cfg.BaseRetryDelay,
+		BatchSize:      cfg.BatchSize,
 	}
 
 	worker := usecase.NewWorkerService(jobRepo, idempotencyStore, workerCfg)
@@ -98,7 +99,7 @@ func run(
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("shutdown solicitado")
+			logger.Info("shutdown requested")
 			return
 		case <-ticker.C:
 			worker.ExecuteCycle(ctx)
@@ -219,7 +220,7 @@ func getEnvInt(key string, fallback int) (int, error) {
 
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
-		return 0, fmt.Errorf("%s inválido: %w", key, err)
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
 	}
 
 	return parsed, nil

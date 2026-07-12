@@ -91,15 +91,21 @@ func (r *PostgresJobRepository) getByIdempotencyKey(ctx context.Context, tenantI
 	return &job, nil
 }
 
-func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, limit int) ([]*domain.ScheduledJob, error) {
+func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, workerID uuid.UUID, limit int) ([]*domain.ScheduledJob, error) {
 	query := `
-		SELECT id, idempotency_key, url, http_method, request_headers, request_body, attempt_count, max_attempts
-		FROM scheduled_jobs
-		WHERE status = 'pending' AND schedule_at <= NOW()
-		ORDER BY schedule_at ASC
-		LIMIT $1`
+		UPDATE scheduled_jobs
+		SET status = 'processing', worker_id = $1, started_at = NOW()
+		WHERE id IN (
+			SELECT id FROM scheduled_jobs
+			WHERE status = 'pending' AND schedule_at <= NOW()
+			ORDER BY schedule_at ASC
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, idempotency_key, url, http_method,
+		          request_headers, request_body, attempt_count, max_attempts`
 
-	rows, err := r.pool.Query(ctx, query, limit)
+	rows, err := r.pool.Query(ctx, query, workerID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -118,28 +124,6 @@ func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, limit int)
 	}
 
 	return jobs, nil
-}
-
-func (r *PostgresJobRepository) Claim(ctx context.Context, workerID uuid.UUID, jobID uuid.UUID) error {
-	query := `
-		UPDATE scheduled_jobs
-		SET status = 'processing', worker_id = $1, started_at = NOW()
-		WHERE id = (
-			SELECT id FROM scheduled_jobs 
-			WHERE id = $2 AND status = 'pending' 
-			FOR UPDATE SKIP LOCKED
-		)`
-
-	res, err := r.pool.Exec(ctx, query, workerID, jobID)
-	if err != nil {
-		return err
-	}
-
-	if res.RowsAffected() == 0 {
-		return domain.ErrJobAlreadyClaimed
-	}
-
-	return nil
 }
 
 func (r *PostgresJobRepository) Update(ctx context.Context, job *domain.ScheduledJob) error {

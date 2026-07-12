@@ -14,11 +14,11 @@ type JobRepository interface {
 	// On conflict, the existing job is returned alongside the error.
 	Insert(ctx context.Context, job *ScheduledJob) (*ScheduledJob, error)
 
-	// FetchNextPending retrieves jobs ready for execution (pending and schedule_at <= now)
-	FetchNextPending(ctx context.Context, limit int) ([]*ScheduledJob, error)
-
-	// Claim marks the job as 'processing', sets worker_id and started_at
-	Claim(ctx context.Context, jobID uuid.UUID, workerID uuid.UUID) error
+	// FetchNextPending claims and returns jobs atomically.
+	// Uses UPDATE ... FOR UPDATE SKIP LOCKED so multiple workers
+	// never process the same job. The returned jobs are already
+	// marked as 'processing' with the given workerID.
+	FetchNextPending(ctx context.Context, workerID uuid.UUID, limit int) ([]*ScheduledJob, error)
 
 	// Update saves the final or intermediate state (success, failure, or reschedule)
 	// Updates status, attempt_count, schedule_at, and last_error_message

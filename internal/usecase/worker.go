@@ -51,7 +51,7 @@ func (s *WorkerService) ExecuteCycle(ctx context.Context) {
 		batchSize = s.config.MaxConcurrency * 2
 	}
 
-	jobs, err := s.repo.FetchNextPending(ctx, batchSize)
+	jobs, err := s.repo.FetchNextPending(ctx, s.workerID, batchSize)
 	if err != nil {
 		slog.Error("failed to fetch jobs", "error", err)
 		return
@@ -62,7 +62,6 @@ func (s *WorkerService) ExecuteCycle(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case s.semaphore <- struct{}{}:
-			// We occupy a slot in the semaphore before attempting to Claim in the database
 			s.wg.Add(1)
 			go func(j *domain.ScheduledJob) {
 				defer func() {
@@ -76,20 +75,23 @@ func (s *WorkerService) ExecuteCycle(ctx context.Context) {
 }
 
 func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
-	// 1. Claim in Postgres (Ensures this worker is the record owner)
-	if err := s.repo.Claim(ctx, s.workerID, job.ID); err != nil {
-		return
-	}
-
-	slog.Info("job claimed", "job_id", job.ID, "url", job.URL)
-
-	// 2. Occupancy Lock in Redis (5 minutes)
-	// If another worker tries the same Job or the same idempotency key, it stops here.
 	isDuplicate, err := s.cache.CheckAndSet(ctx, job.IdempotencyKey, 5*time.Minute)
 
 	if err != nil {
-		slog.Error("error accessing redis", "job_id", job.ID, "error", err)
-		return // Infrastructure failure: we stop to avoid risking duplication
+		slog.Error("error accessing redis, releasing claim and aborting", "job_id", job.ID, "error", err)
+		// Release the Postgres claim to avoid zombie processing jobs.
+		// Reset status back to pending so another worker can pick it up.
+		// Use a background context since the original ctx may be cancelled.
+		resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		job.Status = domain.StatusPending
+		job.WorkerID = nil
+		job.StartedAt = nil
+		if updateErr := s.repo.Update(resetCtx, job); updateErr != nil {
+			slog.Error("failed to release claim after redis error, job may be stuck in processing",
+				"job_id", job.ID, "error", updateErr)
+		}
+		return
 	}
 
 	if isDuplicate {
@@ -97,7 +99,6 @@ func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
 		return
 	}
 
-	// 3. Prepare execution record
 	execution := &domain.ExecutionRecord{
 		JobID:      job.ID,
 		AttemptNum: job.AttemptCount + 1,
@@ -105,13 +106,10 @@ func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
 		WorkerID:   &s.workerID,
 	}
 
-	// 4. Execute the Webhook (The moment of truth)
 	resp, err := s.sendRequest(ctx, job)
 
-	// 5. Idempotency Lifecycle Management (Redis)
 	s.manageIdempotencyState(ctx, job.IdempotencyKey, resp, err)
 
-	// 6. Finalize and persist the result in the Database (Postgres)
 	s.handleCompletion(ctx, job, resp, err, execution)
 }
 
