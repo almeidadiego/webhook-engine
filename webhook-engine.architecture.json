@@ -1,0 +1,261 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Webhook Engine — Runtime Architecture",
+    "subtitle": "Go Worker, PostgreSQL (distributed lock), Redis (idempotency), HTTP delivery",
+    "output": "webhook-engine.architecture.html",
+    "visual_preset": "signal-flow",
+    "quality_profile": "showcase",
+    "viewBox": [880, 540],
+    "views": [
+      {
+        "id": "happy-path",
+        "label": "Happy Path",
+        "focus": [
+          "seeder",
+          "postgres",
+          "worker-service",
+          "job-repo",
+          "idempotency-store",
+          "http-client",
+          "webhook-target"
+        ],
+        "note": "Insert → claim (SKIP LOCKED) → idempotency guard (SET NX) → HTTP deliver → 2xx → seal 24h → completed"
+      },
+      {
+        "id": "failure-retry",
+        "label": "Failure + Retry",
+        "focus": [
+          "worker-service",
+          "http-client",
+          "webhook-target",
+          "idempotency-store",
+          "job-repo",
+          "postgres"
+        ],
+        "note": "HTTP fails → delete Redis key → backoff + jitter → reschedule → retry or fail permanently"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "seeder",
+      "type": "external",
+      "label": "Seeder",
+      "sublabel": "cmd/seeder",
+      "pos": [40, 40],
+      "size": [110, 56],
+      "tag": "CLI tool"
+    },
+    {
+      "id": "worker-service",
+      "type": "backend",
+      "label": "WorkerService",
+      "sublabel": "internal/usecase",
+      "pos": [220, 120],
+      "size": [150, 64],
+      "tag": "core orchestrator"
+    },
+    {
+      "id": "http-client",
+      "type": "backend",
+      "label": "HTTP Client",
+      "sublabel": "net/http 30s timeout",
+      "pos": [440, 120],
+      "size": [130, 64],
+      "tag": "outbound"
+    },
+    {
+      "id": "job-repo",
+      "type": "database",
+      "label": "PostgresJobRepository",
+      "sublabel": "internal/infra/repository",
+      "pos": [210, 280],
+      "size": [170, 64],
+      "tag": "implements JobRepository"
+    },
+    {
+      "id": "idempotency-store",
+      "type": "database",
+      "label": "RedisIdempotencyStore",
+      "sublabel": "internal/infra/repository",
+      "pos": [440, 280],
+      "size": [170, 64],
+      "tag": "implements IdempotencyStore"
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL 16",
+      "sublabel": "scheduled_jobs + job_executions",
+      "pos": [225, 410],
+      "size": [140, 64],
+      "tag": "stateful"
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis 7",
+      "sublabel": "idempotency keys (idemp:*)",
+      "pos": [465, 410],
+      "size": [120, 56],
+      "tag": "stateful"
+    },
+    {
+      "id": "webhook-target",
+      "type": "external",
+      "label": "Webhook Target",
+      "sublabel": "external HTTP endpoint",
+      "pos": [700, 120],
+      "size": [140, 64],
+      "tag": "external"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Worker Process (Go binary — cmd/worker)",
+      "wraps": [
+        "worker-service",
+        "job-repo",
+        "idempotency-store",
+        "http-client"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Infrastructure (docker-compose)",
+      "wraps": [
+        "postgres",
+        "redis"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "seeder-insert",
+      "from": "seeder",
+      "to": "postgres",
+      "label": "① INSERT jobs",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [[95, 108], [95, 442], [213, 442]],
+      "labelAt": [95, 260]
+    },
+    {
+      "id": "fetch-claim",
+      "from": "worker-service",
+      "to": "job-repo",
+      "label": "② FetchNextPending",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [330, 220]
+    },
+    {
+      "id": "job-repo-sql",
+      "from": "job-repo",
+      "to": "postgres",
+      "label": "③ SKIP LOCKED SQL",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [348, 378]
+    },
+    {
+      "id": "check-idempotency",
+      "from": "worker-service",
+      "to": "idempotency-store",
+      "label": "④ CheckAndSet (SET NX)",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [[415, 152], [415, 312]],
+      "labelAt": [520, 212]
+    },
+    {
+      "id": "store-redis",
+      "from": "idempotency-store",
+      "to": "redis",
+      "label": "⑤ SET NX + TTL",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [565, 378]
+    },
+    {
+      "id": "seal-release",
+      "from": "worker-service",
+      "to": "idempotency-store",
+      "label": "⑨ UpdateTTL / Delete",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [[430, 152], [430, 250], [525, 250]],
+      "labelAt": [478, 244]
+    },
+    {
+      "id": "send-request",
+      "from": "worker-service",
+      "to": "http-client",
+      "label": "⑥ sendRequest",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [340, 108]
+    },
+    {
+      "id": "http-deliver",
+      "from": "http-client",
+      "to": "webhook-target",
+      "label": "⑦ HTTP POST/PUT/GET",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": 20
+    },
+    {
+      "id": "update-result",
+      "from": "worker-service",
+      "to": "job-repo",
+      "label": "⑧ Update + SaveExecution",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [[196, 152], [196, 312]],
+      "labelAt": [196, 220]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Job Lifecycle",
+      "items": [
+        "pending → processing (claimed via FOR UPDATE SKIP LOCKED)",
+        "processing → completed (HTTP 2xx + Redis TTL seal to 24h)",
+        "processing → pending (retry: exponential backoff + jitter)",
+        "processing → failed (max attempts exhausted)"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Concurrency Model",
+      "items": [
+        "Semaphore channel limits goroutines (default 10 concurrent)",
+        "sync.WaitGroup tracks in-flight jobs for graceful shutdown",
+        "Multiple workers safe: SKIP LOCKED (PG) + SET NX (Redis)"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Tech Stack",
+      "items": [
+        "Go 1.25, pgx/v5 connection pool, go-redis/v9",
+        "PostgreSQL 16 + Redis 7 (docker-compose)",
+        "slog structured logging, UUID idempotency keys"
+      ]
+    }
+  ]
+}

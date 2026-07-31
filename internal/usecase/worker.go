@@ -14,6 +14,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// shutdownGraceTimeout bounds the lifetime of in-flight HTTP calls + persistence
+// during graceful shutdown. Budget: HTTP (30s) + Redis (5s) + DB writes (5s) + buffer (5s).
+const shutdownGraceTimeout = 45 * time.Second
+
 type WorkerService struct {
 	repo       domain.JobRepository
 	cache      domain.IdempotencyStore
@@ -106,11 +110,17 @@ func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
 		WorkerID:   &s.workerID,
 	}
 
-	resp, err := s.sendRequest(ctx, job)
+	// Once we commit to the HTTP call, all subsequent operations must survive
+	// parent context cancellation (e.g., SIGTERM). The timeout bounds the
+	// goroutine lifetime so Stop() -> wg.Wait() always returns.
+	detachedCtx, cancel := context.WithTimeout(context.Background(), shutdownGraceTimeout)
+	defer cancel()
 
-	s.manageIdempotencyState(ctx, job.IdempotencyKey, resp, err)
+	resp, err := s.sendRequest(detachedCtx, job)
 
-	s.handleCompletion(ctx, job, resp, err, execution)
+	s.manageIdempotencyState(detachedCtx, job.IdempotencyKey, resp, err)
+
+	s.handleCompletion(detachedCtx, job, resp, err, execution)
 }
 
 // manageIdempotencyState decide se mantém ou remove a trava no Redis
