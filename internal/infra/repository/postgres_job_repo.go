@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/almeidadiego/webhook-engine/internal/domain"
 
@@ -151,6 +152,26 @@ func (r *PostgresJobRepository) SaveExecution(ctx context.Context, exec *domain.
 		exec.DurationMs, exec.ResponseStatusCode, exec.ErrorMessage, exec.WorkerID)
 
 	return err
+}
+
+func (r *PostgresJobRepository) ReclaimStaleJobs(ctx context.Context, staleThreshold time.Duration, limit int) (int64, error) {
+	query := `
+		UPDATE scheduled_jobs
+		SET status = 'pending', worker_id = NULL, started_at = NULL, updated_at = NOW()
+		WHERE id IN (
+			SELECT id FROM scheduled_jobs
+			WHERE status = 'processing' AND started_at < NOW() - $1::INTERVAL
+			ORDER BY started_at ASC
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)`
+
+	result, err := r.pool.Exec(ctx, query, staleThreshold, limit)
+	if err != nil {
+		return 0, err
+	}
+
+	return result.RowsAffected(), nil
 }
 
 func isNoRows(err error) bool {

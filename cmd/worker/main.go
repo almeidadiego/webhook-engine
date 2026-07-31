@@ -19,15 +19,17 @@ import (
 )
 
 type config struct {
-	PostgresURL    string
-	RedisAddr      string
-	RedisPassword  string
-	RedisDB        int
-	PollInterval   time.Duration
-	MaxConcurrency int
-	BaseRetryDelay time.Duration
-	BatchSize      int
-	LogLevel       slog.Level
+	PostgresURL       string
+	RedisAddr         string
+	RedisPassword     string
+	RedisDB           int
+	PollInterval      time.Duration
+	ReaperInterval    time.Duration
+	MaxConcurrency    int
+	BaseRetryDelay    time.Duration
+	BatchSize         int
+	StaleJobThreshold time.Duration
+	LogLevel          slog.Level
 }
 
 func main() {
@@ -64,9 +66,10 @@ func main() {
 	idempotencyStore := repository.NewRedisIdempotencyStore(redisClient)
 
 	workerCfg := domain.WorkerConfig{
-		MaxConcurrency: cfg.MaxConcurrency,
-		BaseRetryDelay: cfg.BaseRetryDelay,
-		BatchSize:      cfg.BatchSize,
+		MaxConcurrency:    cfg.MaxConcurrency,
+		BaseRetryDelay:    cfg.BaseRetryDelay,
+		BatchSize:         cfg.BatchSize,
+		StaleJobThreshold: cfg.StaleJobThreshold,
 	}
 
 	worker := usecase.NewWorkerService(jobRepo, idempotencyStore, workerCfg)
@@ -74,11 +77,13 @@ func main() {
 	logger.Info(
 		"worker started",
 		"poll_interval", cfg.PollInterval.String(),
+		"reaper_interval", cfg.ReaperInterval.String(),
+		"stale_threshold", cfg.StaleJobThreshold.String(),
 		"max_concurrency", cfg.MaxConcurrency,
 		"base_retry_delay", cfg.BaseRetryDelay.String(),
 	)
 
-	run(ctx, logger, worker, cfg.PollInterval)
+	run(ctx, logger, worker, cfg.PollInterval, cfg.ReaperInterval)
 
 	logger.Info("shutting down worker, waiting for in-flight jobs")
 	worker.Stop()
@@ -89,10 +94,13 @@ func run(
 	ctx context.Context,
 	logger *slog.Logger,
 	worker *usecase.WorkerService,
-	pollInterval time.Duration,
+	pollInterval, reaperInterval time.Duration,
 ) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+
+	reaperTicker := time.NewTicker(reaperInterval)
+	defer reaperTicker.Stop()
 
 	worker.ExecuteCycle(ctx)
 
@@ -103,6 +111,8 @@ func run(
 			return
 		case <-ticker.C:
 			worker.ExecuteCycle(ctx)
+		case <-reaperTicker.C:
+			worker.RunReaper(ctx)
 		}
 	}
 }
@@ -133,6 +143,16 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	reaperInterval, err := getEnvDuration("WORKER_REAPER_INTERVAL", 60*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+
+	staleJobThreshold, err := getEnvDuration("WORKER_STALE_THRESHOLD", 60*time.Second)
+	if err != nil {
+		return config{}, err
+	}
+
 	logLevel, err := parseLogLevel(getEnv("LOG_LEVEL", "info"))
 	if err != nil {
 		return config{}, err
@@ -144,15 +164,17 @@ func loadConfig() (config, error) {
 	}
 
 	return config{
-		PostgresURL:    postgresURL,
-		RedisAddr:      getEnv("REDIS_ADDR", "localhost:6379"),
-		RedisPassword:  getEnv("REDIS_PASSWORD", ""),
-		RedisDB:        redisDB,
-		PollInterval:   pollInterval,
-		MaxConcurrency: maxConcurrency,
-		BaseRetryDelay: baseRetryDelay,
-		BatchSize:      batchSize,
-		LogLevel:       logLevel,
+		PostgresURL:       postgresURL,
+		RedisAddr:         getEnv("REDIS_ADDR", "localhost:6379"),
+		RedisPassword:     getEnv("REDIS_PASSWORD", ""),
+		RedisDB:           redisDB,
+		PollInterval:      pollInterval,
+		ReaperInterval:    reaperInterval,
+		MaxConcurrency:    maxConcurrency,
+		BaseRetryDelay:    baseRetryDelay,
+		BatchSize:         batchSize,
+		StaleJobThreshold: staleJobThreshold,
+		LogLevel:          logLevel,
 	}, nil
 }
 

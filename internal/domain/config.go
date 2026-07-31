@@ -13,4 +13,9 @@ type WorkerConfig struct {
 
 	// BatchSize defines how many jobs the worker tries to fetch from the database per cycle.
 	BatchSize int
+
+	// StaleJobThreshold defines how long a job can remain in 'processing' status
+	// before the reaper reclaims it. Must exceed the detached context timeout (45s)
+	// to prevent races with in-flight goroutines.
+	StaleJobThreshold time.Duration
 }

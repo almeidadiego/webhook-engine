@@ -26,6 +26,12 @@ type JobRepository interface {
 
 	// SaveExecution saves detailed history to the job_executions table
 	SaveExecution(ctx context.Context, exec *ExecutionRecord) error
+
+	// ReclaimStaleJobs finds jobs stuck in 'processing' status longer than staleThreshold
+	// and resets them to 'pending' for reprocessing. Uses FOR UPDATE SKIP LOCKED to safely
+	// cooperate with other reapers in multi-replica deployments.
+	// Returns the number of jobs reclaimed.
+	ReclaimStaleJobs(ctx context.Context, staleThreshold time.Duration, limit int) (int64, error)
 }
 
 type IdempotencyStore interface {

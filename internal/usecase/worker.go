@@ -203,3 +203,19 @@ func (s *WorkerService) Stop() {
 	slog.Info("waiting for in-flight webhooks to finish...")
 	s.wg.Wait()
 }
+
+// RunReaper reclaims jobs stuck in 'processing' for longer than the configured
+// stale threshold, resetting them to 'pending' for reprocessing.
+func (s *WorkerService) RunReaper(ctx context.Context) {
+	reclaimed, err := s.repo.ReclaimStaleJobs(ctx, s.config.StaleJobThreshold, s.config.BatchSize)
+	if err != nil {
+		slog.Error("reaper: failed to reclaim stale jobs", "error", err)
+		return
+	}
+
+	if reclaimed > 0 {
+		slog.Warn("reaper: reclaimed stale jobs", "count", reclaimed, "threshold", s.config.StaleJobThreshold)
+	} else {
+		slog.Debug("reaper: no stale jobs found")
+	}
+}
