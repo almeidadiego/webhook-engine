@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/almeidadiego/webhook-engine/internal/domain"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -135,11 +137,44 @@ func (r *PostgresJobRepository) Update(ctx context.Context, job *domain.Schedule
 		    last_error_message = $5, worker_id = NULL, started_at = NULL
 		WHERE id = $6`
 
-	_, err := r.pool.Exec(ctx, query,
-		job.Status, job.AttemptCount, job.ScheduleAt,
-		job.LastResponseCode, job.LastErrorMessage, job.ID)
+	const maxAttempts = 3
+	const retryInterval = 2 * time.Second
 
-	return err
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Check context before each attempt (including the first)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		_, lastErr = r.pool.Exec(ctx, query,
+			job.Status, job.AttemptCount, job.ScheduleAt,
+			job.LastResponseCode, job.LastErrorMessage, job.ID)
+
+		if lastErr == nil {
+			return nil // success
+		}
+
+		// If error is not transient, fail immediately
+		if !isTransientError(lastErr) {
+			return lastErr
+		}
+
+		// If this was the last attempt, return the error
+		if attempt == maxAttempts {
+			break
+		}
+
+		// Wait before retrying, but respect context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+			// continue to next attempt
+		}
+	}
+
+	return lastErr
 }
 
 func (r *PostgresJobRepository) SaveExecution(ctx context.Context, exec *domain.ExecutionRecord) error {
@@ -147,11 +182,44 @@ func (r *PostgresJobRepository) SaveExecution(ctx context.Context, exec *domain.
 		INSERT INTO job_executions (job_id, attempt_num, started_at, ended_at, duration_ms, response_status_code, error_message, worker_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
-	_, err := r.pool.Exec(ctx, query,
-		exec.JobID, exec.AttemptNum, exec.StartedAt, exec.EndedAt,
-		exec.DurationMs, exec.ResponseStatusCode, exec.ErrorMessage, exec.WorkerID)
+	const maxAttempts = 3
+	const retryInterval = 2 * time.Second
 
-	return err
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Check context before each attempt (including the first)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		_, lastErr = r.pool.Exec(ctx, query,
+			exec.JobID, exec.AttemptNum, exec.StartedAt, exec.EndedAt,
+			exec.DurationMs, exec.ResponseStatusCode, exec.ErrorMessage, exec.WorkerID)
+
+		if lastErr == nil {
+			return nil // success
+		}
+
+		// If error is not transient, fail immediately
+		if !isTransientError(lastErr) {
+			return lastErr
+		}
+
+		// If this was the last attempt, return the error
+		if attempt == maxAttempts {
+			break
+		}
+
+		// Wait before retrying, but respect context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryInterval):
+			// continue to next attempt
+		}
+	}
+
+	return lastErr
 }
 
 func (r *PostgresJobRepository) ReclaimStaleJobs(ctx context.Context, staleThreshold time.Duration, limit int) (int64, error) {
@@ -176,4 +244,37 @@ func (r *PostgresJobRepository) ReclaimStaleJobs(ctx context.Context, staleThres
 
 func isNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+// isTransientError classifies pgx errors to determine if a retry is worthwhile.
+// Returns true for connection failures, serialization conflicts, and deadlocks.
+// Returns false for permanent errors (integrity violations, data errors) and context cancellation.
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Context cancellation is not transient — retrying won't help
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	// Check for pgx-specific SQLSTATE codes
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		// Class 08: Connection Exception (transient)
+		if strings.HasPrefix(pgErr.Code, "08") {
+			return true
+		}
+		// 40001: serialization_failure (transient)
+		if pgErr.Code == "40001" {
+			return true
+		}
+		// 40P01: deadlock_detected (transient, Postgres already killed the loser)
+		if pgErr.Code == "40P01" {
+			return true
+		}
+	}
+
+	return false
 }
