@@ -118,26 +118,7 @@ func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
 
 	resp, err := s.sendRequest(detachedCtx, job)
 
-	s.manageIdempotencyState(detachedCtx, job.IdempotencyKey, resp, err)
-
 	s.handleCompletion(detachedCtx, job, resp, err, execution)
-}
-
-// manageIdempotencyState decide se mantém ou remove a trava no Redis
-func (s *WorkerService) manageIdempotencyState(ctx context.Context, key string, resp *http.Response, err error) {
-	// On success (2xx), we transform the 5min lock into a 24h seal
-	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if err := s.cache.UpdateTTL(ctx, key, 24*time.Hour); err != nil {
-			slog.Error("error extending idempotency TTL", "key", key, "error", err)
-		}
-		return
-	}
-
-	// On network error or status >= 400, we release the key for the next retry
-	// If Delete fails, the original 5 min TTL from CheckAndSet is our fallback.
-	if err := s.cache.Delete(ctx, key); err != nil {
-		slog.Warn("failed to delete redis lock (waiting for TTL)", "key", key, "error", err)
-	}
 }
 
 func (s *WorkerService) sendRequest(ctx context.Context, job *domain.ScheduledJob) (*http.Response, error) {
@@ -189,12 +170,40 @@ func (s *WorkerService) handleCompletion(ctx context.Context, job *domain.Schedu
 		slog.Info("job completed successfully", "job_id", job.ID)
 	}
 
-	// Final persistence
-	if err := s.repo.Update(ctx, job); err != nil {
-		slog.Error("error updating job in the database", "job_id", job.ID, "error", err)
+	// DB persistence (must succeed before sealing the Redis key)
+	updateErr := s.repo.Update(ctx, job)
+	if updateErr != nil {
+		slog.Error("error updating job in the database", "job_id", job.ID, "error", updateErr)
 	}
-	if err := s.repo.SaveExecution(ctx, exec); err != nil {
-		slog.Error("error saving execution history", "job_id", job.ID, "error", err)
+
+	saveErr := s.repo.SaveExecution(ctx, exec)
+	if saveErr != nil {
+		slog.Error("error saving execution history", "job_id", job.ID, "error", saveErr)
+	}
+
+	// Redis seal/delete — only if DB writes succeeded.
+	// If DB writes failed, the Redis key keeps its 5min TTL as temporary
+	// protection against re-delivery while the reaper reclaims the job.
+	if updateErr == nil {
+		s.sealOrReleaseIdempotencyKey(ctx, job.IdempotencyKey, resp, err)
+	}
+}
+
+// sealOrReleaseIdempotencyKey transforms the 5min lock into a 24h seal on success,
+// or deletes it on failure to allow retries.
+func (s *WorkerService) sealOrReleaseIdempotencyKey(ctx context.Context, key string, resp *http.Response, err error) {
+	// On success (2xx), we transform the 5min lock into a 24h seal
+	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if err := s.cache.UpdateTTL(ctx, key, 24*time.Hour); err != nil {
+			slog.Error("error extending idempotency TTL", "key", key, "error", err)
+		}
+		return
+	}
+
+	// On network error or status >= 400, we release the key for the next retry
+	// If Delete fails, the original 5 min TTL from CheckAndSet is our fallback.
+	if err := s.cache.Delete(ctx, key); err != nil {
+		slog.Warn("failed to delete redis lock (waiting for TTL)", "key", key, "error", err)
 	}
 }
 

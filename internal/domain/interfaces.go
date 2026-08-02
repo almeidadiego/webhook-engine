@@ -39,7 +39,7 @@ type IdempotencyStore interface {
 	// The ttl defines how long this initial "lock" will last.
 	CheckAndSet(ctx context.Context, key string, ttl time.Duration) (bool, error)
 
-	// UpdateTTL extends the key's lifetime (e.g., from 1 min to 24h after success)
+	// UpdateTTL extends the key's lifetime (e.g., from 5 min to 24h after success)
 	UpdateTTL(ctx context.Context, key string, ttl time.Duration) error
 
 	// Delete removes the key (used on failure to allow retry)
