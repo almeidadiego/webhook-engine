@@ -54,7 +54,7 @@ cleanup() {
     # Kill worker binary (not go run wrapper) by process name
     pkill -f "webhook-engine.*worker" 2>/dev/null || true
     # Kill HTTP server
-    pkill -f "python3.*9999" 2>/dev/null || true
+    pkill -f "dummy-server" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -140,18 +140,9 @@ sql "SELECT id, tenant_id, idempotency_key, url, status, attempt_count, max_atte
 sep
 log "Step 5/6: Starting worker (will run for ${POLL_INTERVAL} poll interval)..."
 
-# The worker will POST to SEEDER_TARGET_URL — start a simple HTTP 200 server
-log "Starting dummy HTTP server on port 9999 (responds 200)..."
-python3 -c "
-import http.server, socketserver
-class H(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'ok')
-    def log_message(self, *a): pass
-socketserver.TCPServer(('', 9999), H).serve_forever()
-" &
+# The worker will POST to SEEDER_TARGET_URL — start a dummy server that counts deliveries
+log "Starting dummy HTTP server on port 9999 (counts deliveries)..."
+python3 scripts/dummy-server.py &
 HTTP_PID=$!
 disown
 sleep 0.5

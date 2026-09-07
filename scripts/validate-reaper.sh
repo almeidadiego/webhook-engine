@@ -56,7 +56,7 @@ redis_cli() { docker exec webhook-redis redis-cli "$@" 2>/dev/null; }
 cleanup() {
     log "Cleaning up..."
     pkill -f "webhook-engine.*worker" 2>/dev/null || true
-    pkill -f "python3.*9999" 2>/dev/null || true
+    pkill -f "dummy-server" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -148,18 +148,8 @@ log "Job has been stuck in 'processing' for 5 minutes — reaper should reclaim 
 sep
 log "Step 3/5: Starting worker with reaper (interval=${REAPER_INTERVAL}, threshold=${STALE_THRESHOLD})..."
 
-# Start dummy HTTP server (responds 200 to all POST)
-log "Starting dummy HTTP server on port 9999..."
-python3 -c "
-import http.server, socketserver
-class H(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'ok')
-    def log_message(self, *a): pass
-socketserver.TCPServer(('', 9999), H).serve_forever()
-" &
+log "Starting dummy HTTP server on port 9999 (counts deliveries)..."
+python3 scripts/dummy-server.py &
 HTTP_PID=$!
 disown
 sleep 0.5
