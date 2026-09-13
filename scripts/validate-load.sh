@@ -46,6 +46,7 @@ WORKER_CONCURRENCY=10
 POLL_INTERVAL="1s"
 REAPER_INTERVAL="10s"
 STALE_THRESHOLD="60s"
+QUEUE_SAMPLE_INTERVAL=5   # seconds between queue depth samples (0 to disable)
 
 # Env-overridable: how long each round sustains peak VUs.
 SUSTAIN_DURATION="${DURATION:-60s}"
@@ -78,6 +79,8 @@ redis_cli() { docker exec webhook-redis redis-cli "$@" 2>/dev/null; }
 cleanup() {
     log "Cleaning up..."
     pkill -f "cmd/api" 2>/dev/null || true
+    pkill -f "go-build.*api" 2>/dev/null || true
+    pkill -f "exe/api" 2>/dev/null || true
     pkill -f "cmd/worker" 2>/dev/null || true
     pkill -f "exe/worker" 2>/dev/null || true
     pkill -f "go-build.*worker" 2>/dev/null || true
@@ -143,6 +146,8 @@ sep
 log "Step 2/4: Starting dummy server, API, and ${WORKER_COUNT} workers..."
 
 log "Starting dummy HTTP server on port ${DUMMY_PORT}..."
+DUMMY_MIN_DELAY_MS="${DUMMY_MIN_DELAY_MS:-0}" \
+DUMMY_MAX_DELAY_MS="${DUMMY_MAX_DELAY_MS:-0}" \
 python3 scripts/dummy-server.py &
 disown
 sleep 0.5
@@ -214,6 +219,23 @@ for ROUND in $(seq "${START_ROUND}" "${END_ROUND}"); do
     POOL_PID=$!
     disown
 
+    # Queue depth collector: samples pending/processing/completed counts every QUEUE_SAMPLE_INTERVAL seconds
+    # This reveals semaphore saturation (processing capped at MaxConcurrency * workers) and
+    # queue backlog (pending growing monotonically when producer > consumer).
+    QUEUE_LOG="/tmp/queue-round${ROUND}.log"
+    : > "${QUEUE_LOG}"  # truncate/create
+    (
+        while true; do
+            PENDING=$(sql "SELECT count(*) FROM scheduled_jobs WHERE status='pending';" | tr -d ' ')
+            PROCESSING=$(sql "SELECT count(*) FROM scheduled_jobs WHERE status='processing';" | tr -d ' ')
+            COMPLETED=$(sql "SELECT count(*) FROM scheduled_jobs WHERE status='completed';" | tr -d ' ')
+            echo "$(date +%H:%M:%S) pending=${PENDING} processing=${PROCESSING} completed=${COMPLETED}" >> "${QUEUE_LOG}"
+            sleep "${QUEUE_SAMPLE_INTERVAL}"
+        done
+    ) &
+    QUEUE_PID=$!
+    disown
+
     log "Running k6 with ${VUS} VUs..."
     # `|| true` on the whole pipeline lets a round finish even if k6 exits
     # non-zero (e.g. a lenient threshold was crossed), so the summary still
@@ -227,6 +249,8 @@ for ROUND in $(seq "${START_ROUND}" "${END_ROUND}"); do
 
     kill "${POOL_PID}" 2>/dev/null || true
     wait "${POOL_PID}" 2>/dev/null || true
+    kill "${QUEUE_PID}" 2>/dev/null || true
+    wait "${QUEUE_PID}" 2>/dev/null || true
     log "Pool collector stopped; samples: /tmp/pool-round${ROUND}.log"
 
     # Extract headline metrics from the k6 output. The real percentiles live on
@@ -244,7 +268,13 @@ for ROUND in $(seq "${START_ROUND}" "${END_ROUND}"); do
     MAX_ACQUIRED=$(grep -oE '"acquired_conns":[0-9]+' "/tmp/pool-round${ROUND}.log" | sed 's/"acquired_conns"://' | sort -n | tail -1)
     MAX_ACQUIRED="${MAX_ACQUIRED:-0}"
 
-    ROUND_RESULTS+=("Round ${ROUND} (${VUS} VUs): p95=${P95:-n/a}, p99=${P99:-n/a}, reqs/s=${HTTP_REQS:-n/a}, errors=${HTTP_FAILED:-n/a}, max_pool_acquired=${MAX_ACQUIRED}")
+    # Queue metrics: max concurrent processing (semaphore saturation signal)
+    # and final pending count (backlog growth signal)
+    MAX_PROCESSING=$(grep -oE 'processing=[0-9]+' "${QUEUE_LOG}" | sed 's/processing=//' | sort -n | tail -1 || echo "0")
+    LAST_PENDING=$(grep -oE 'pending=[0-9]+' "${QUEUE_LOG}" | sed 's/pending=//' | tail -1 || echo "0")
+    LAST_COMPLETED=$(grep -oE 'completed=[0-9]+' "${QUEUE_LOG}" | sed 's/completed=//' | tail -1 || echo "0")
+
+    ROUND_RESULTS+=("Round ${ROUND} (${VUS} VUs): p95=${P95:-n/a}, p99=${P99:-n/a}, reqs/s=${HTTP_REQS:-n/a}, errors=${HTTP_FAILED:-n/a}, max_pool_acquired=${MAX_ACQUIRED:-0}, max_processing=${MAX_PROCESSING:-0}, final_pending=${LAST_PENDING:-0}, final_completed=${LAST_COMPLETED:-0}")
 done
 
 # ─── Step 4: Summary ────────────────────────────────────────────────────────
