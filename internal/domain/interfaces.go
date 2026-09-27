@@ -20,9 +20,27 @@ type JobRepository interface {
 	// marked as 'processing' with the given workerID.
 	FetchNextPending(ctx context.Context, workerID uuid.UUID, limit int) ([]*ScheduledJob, error)
 
-	// Update saves the final or intermediate state (success, failure, or reschedule)
-	// Updates status, attempt_count, schedule_at, and last_error_message
-	Update(ctx context.Context, job *ScheduledJob) error
+	// CompleteJob transitions a job from 'processing' to 'completed'.
+	// Returns (true, nil) if the transition succeeded.
+	// Returns (false, nil) if the job was no longer in 'processing' state
+	// (e.g., reclaimed by the reaper) — the caller lost the claim race.
+	// Returns (false, err) on infrastructure failures.
+	CompleteJob(ctx context.Context, job *ScheduledJob) (bool, error)
+
+	// RescheduleJob transitions a job from 'processing' to 'pending' with a new
+	// schedule_at (for retry with backoff). Returns (false, nil) if the claim
+	// was lost to another worker or the reaper.
+	RescheduleJob(ctx context.Context, job *ScheduledJob) (bool, error)
+
+	// FailJob transitions a job from 'processing' to 'failed' (terminal state,
+	// max attempts exhausted). Returns (false, nil) if the claim was lost.
+	FailJob(ctx context.Context, job *ScheduledJob) (bool, error)
+
+	// ReleaseClaim transitions a job from 'processing' back to 'pending' with
+	// schedule_at = NOW() for immediate re-pickup. Used when the worker must
+	// abort before attempting delivery (e.g., Redis idempotency check failed).
+	// Returns (false, nil) if the claim was already lost.
+	ReleaseClaim(ctx context.Context, job *ScheduledJob) (bool, error)
 
 	// SaveExecution saves detailed history to the job_executions table
 	SaveExecution(ctx context.Context, exec *ExecutionRecord) error

@@ -129,97 +129,115 @@ func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, workerID u
 	return jobs, nil
 }
 
-func (r *PostgresJobRepository) Update(ctx context.Context, job *domain.ScheduledJob) error {
+// CompleteJob transitions processing → completed with a state guard.
+// The WHERE status = 'processing' clause ensures we never overwrite a
+// concurrent state change (e.g., reaper reclaim). This is Compare-And-Swap
+// at the database level — a foundational pattern for distributed state machines.
+func (r *PostgresJobRepository) CompleteJob(ctx context.Context, job *domain.ScheduledJob) (bool, error) {
 	query := `
 		UPDATE scheduled_jobs
-		SET status = $1, attempt_count = $2, schedule_at = $3, 
-		    last_attempt_at = NOW(), last_response_status_code = $4, 
-		    last_error_message = $5, worker_id = NULL, started_at = NULL
-		WHERE id = $6`
+		SET status = 'completed',
+		    attempt_count = $1,
+		    last_attempt_at = NOW(),
+		    last_response_status_code = $2,
+		    last_error_message = NULL,
+		    worker_id = NULL,
+		    started_at = NULL,
+		    updated_at = NOW()
+		WHERE id = $3 AND status = 'processing'`
 
-	const maxAttempts = 3
-	const retryInterval = 2 * time.Second
-
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Check context before each attempt (including the first)
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		_, lastErr = r.pool.Exec(ctx, query,
-			job.Status, job.AttemptCount, job.ScheduleAt,
-			job.LastResponseCode, job.LastErrorMessage, job.ID)
-
-		if lastErr == nil {
-			return nil // success
-		}
-
-		// If error is not transient, fail immediately
-		if !isTransientError(lastErr) {
-			return lastErr
-		}
-
-		// If this was the last attempt, return the error
-		if attempt == maxAttempts {
-			break
-		}
-
-		// Wait before retrying, but respect context cancellation
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(retryInterval):
-			// continue to next attempt
-		}
+	result, err := r.pool.Exec(ctx, query,
+		job.AttemptCount, job.LastResponseCode, job.ID)
+	if err != nil {
+		return false, err
 	}
-
-	return lastErr
+	return result.RowsAffected() > 0, nil
 }
 
+// RescheduleJob transitions processing → pending with a new schedule_at (retry backoff).
+// The state guard prevents overwriting a concurrent reaper reclaim.
+func (r *PostgresJobRepository) RescheduleJob(ctx context.Context, job *domain.ScheduledJob) (bool, error) {
+	query := `
+		UPDATE scheduled_jobs
+		SET status = 'pending',
+		    attempt_count = $1,
+		    schedule_at = $2,
+		    last_attempt_at = NOW(),
+		    last_response_status_code = $3,
+		    last_error_message = $4,
+		    worker_id = NULL,
+		    started_at = NULL,
+		    updated_at = NOW()
+		WHERE id = $5 AND status = 'processing'`
+
+	result, err := r.pool.Exec(ctx, query,
+		job.AttemptCount, job.ScheduleAt, job.LastResponseCode,
+		job.LastErrorMessage, job.ID)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+// FailJob transitions processing → failed (terminal state, max attempts exhausted).
+func (r *PostgresJobRepository) FailJob(ctx context.Context, job *domain.ScheduledJob) (bool, error) {
+	query := `
+		UPDATE scheduled_jobs
+		SET status = 'failed',
+		    attempt_count = $1,
+		    last_attempt_at = NOW(),
+		    last_response_status_code = $2,
+		    last_error_message = $3,
+		    worker_id = NULL,
+		    started_at = NULL,
+		    updated_at = NOW()
+		WHERE id = $4 AND status = 'processing'`
+
+	result, err := r.pool.Exec(ctx, query,
+		job.AttemptCount, job.LastResponseCode,
+		job.LastErrorMessage, job.ID)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+// ReleaseClaim transitions processing → pending with schedule_at = NOW()
+// for immediate re-pickup. Used when the worker must abort before attempting
+// delivery (e.g., Redis idempotency check failed at the start of runJob).
+// The state guard ensures we only release a claim we still own.
+func (r *PostgresJobRepository) ReleaseClaim(ctx context.Context, job *domain.ScheduledJob) (bool, error) {
+	query := `
+		UPDATE scheduled_jobs
+		SET status = 'pending',
+		    schedule_at = NOW(),
+		    worker_id = NULL,
+		    started_at = NULL,
+		    updated_at = NOW()
+		WHERE id = $1 AND status = 'processing'`
+
+	result, err := r.pool.Exec(ctx, query, job.ID)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+// SaveExecution saves detailed history to the job_executions table.
+// Uses ON CONFLICT DO NOTHING to handle the rare race where the original
+// goroutine's SaveExecution and a re-execution's SaveExecution target the
+// same (job_id, attempt_num) pair. First write wins — history is preserved.
 func (r *PostgresJobRepository) SaveExecution(ctx context.Context, exec *domain.ExecutionRecord) error {
 	query := `
 		INSERT INTO job_executions (job_id, attempt_num, started_at, ended_at, duration_ms, response_status_code, error_message, worker_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (job_id, attempt_num) DO NOTHING`
 
-	const maxAttempts = 3
-	const retryInterval = 2 * time.Second
+	_, err := r.pool.Exec(ctx, query,
+		exec.JobID, exec.AttemptNum, exec.StartedAt, exec.EndedAt,
+		exec.DurationMs, exec.ResponseStatusCode, exec.ErrorMessage, exec.WorkerID)
 
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Check context before each attempt (including the first)
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		_, lastErr = r.pool.Exec(ctx, query,
-			exec.JobID, exec.AttemptNum, exec.StartedAt, exec.EndedAt,
-			exec.DurationMs, exec.ResponseStatusCode, exec.ErrorMessage, exec.WorkerID)
-
-		if lastErr == nil {
-			return nil // success
-		}
-
-		// If error is not transient, fail immediately
-		if !isTransientError(lastErr) {
-			return lastErr
-		}
-
-		// If this was the last attempt, return the error
-		if attempt == maxAttempts {
-			break
-		}
-
-		// Wait before retrying, but respect context cancellation
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(retryInterval):
-			// continue to next attempt
-		}
-	}
-
-	return lastErr
+	return err
 }
 
 func (r *PostgresJobRepository) ReclaimStaleJobs(ctx context.Context, staleThreshold time.Duration, limit int) (int64, error) {

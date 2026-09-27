@@ -84,16 +84,13 @@ func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
 	if err != nil {
 		slog.Error("error accessing redis, releasing claim and aborting", "job_id", job.ID, "error", err)
 		// Release the Postgres claim to avoid zombie processing jobs.
-		// Reset status back to pending so another worker can pick it up.
+		// schedule_at = NOW() makes the job eligible for immediate re-pickup.
 		// Use a background context since the original ctx may be cancelled.
 		resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		job.Status = domain.StatusPending
-		job.WorkerID = nil
-		job.StartedAt = nil
-		if updateErr := s.repo.Update(resetCtx, job); updateErr != nil {
+		if _, releaseErr := s.repo.ReleaseClaim(resetCtx, job); releaseErr != nil {
 			slog.Error("failed to release claim after redis error, job may be stuck in processing",
-				"job_id", job.ID, "error", updateErr)
+				"job_id", job.ID, "error", releaseErr)
 		}
 		return
 	}
@@ -170,23 +167,43 @@ func (s *WorkerService) handleCompletion(ctx context.Context, job *domain.Schedu
 		slog.Info("job completed successfully", "job_id", job.ID)
 	}
 
-	// DB persistence (must succeed before sealing the Redis key)
-	updateErr := s.repo.Update(ctx, job)
-	if updateErr != nil {
-		slog.Error("error updating job in the database", "job_id", job.ID, "error", updateErr)
-	}
-
-	saveErr := s.repo.SaveExecution(ctx, exec)
-	if saveErr != nil {
+	// Execution history is always attempted — it's valuable regardless of claim ownership.
+	// ON CONFLICT DO NOTHING handles the rare race where both the original goroutine
+	// and a re-execution insert the same (job_id, attempt_num). First write wins.
+	if saveErr := s.repo.SaveExecution(ctx, exec); saveErr != nil {
 		slog.Error("error saving execution history", "job_id", job.ID, "error", saveErr)
 	}
 
-	// Redis seal/delete — only if DB writes succeeded.
-	// If DB writes failed, the Redis key keeps its 5min TTL as temporary
-	// protection against re-delivery while the reaper reclaims the job.
-	if updateErr == nil {
-		s.sealOrReleaseIdempotencyKey(ctx, job.IdempotencyKey, resp, err)
+	// Persist the state transition with a guard. The guard ensures we never
+	// overwrite a concurrent state change (e.g., reaper reclaim) — Compare-And-Swap.
+	var claimOwned bool
+	var transitionErr error
+
+	switch job.Status {
+	case domain.StatusCompleted:
+		claimOwned, transitionErr = s.repo.CompleteJob(ctx, job)
+	case domain.StatusPending:
+		claimOwned, transitionErr = s.repo.RescheduleJob(ctx, job)
+	case domain.StatusFailed:
+		claimOwned, transitionErr = s.repo.FailJob(ctx, job)
 	}
+
+	if transitionErr != nil {
+		slog.Error("failed to persist state transition",
+			"job_id", job.ID, "target_status", job.Status, "error", transitionErr)
+	}
+
+	if !claimOwned {
+		// We lost the claim race — another worker or the reaper changed the state
+		// before our write. Do NOT touch the idempotency key: the current owner
+		// will handle it. Rare by construction (reaper threshold > detachedCtx).
+		slog.Warn("lost claim race — state transition blocked by guard",
+			"job_id", job.ID, "target_status", job.Status)
+		return
+	}
+
+	// We own the claim: proceed with idempotency seal-or-release (P3 semantics).
+	s.sealOrReleaseIdempotencyKey(ctx, job.IdempotencyKey, resp, err)
 }
 
 // sealOrReleaseIdempotencyKey transforms the 5min lock into a 24h seal on success,
