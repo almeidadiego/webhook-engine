@@ -53,13 +53,15 @@ type JobRepository interface {
 }
 
 type IdempotencyStore interface {
-	// CheckAndSet attempts to write the key. Returns true if it already exists (duplicate).
-	// The ttl defines how long this initial "lock" will last.
-	CheckAndSet(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	// CheckAndSet attempts to write a tenant-scoped idempotency key.
+	// Returns true if the key already exists (duplicate for this tenant).
+	// The key is scoped as "idemp:{tenantID}:{key}" to prevent cross-tenant collisions.
+	CheckAndSet(ctx context.Context, tenantID uuid.UUID, key string, ttl time.Duration) (bool, error)
 
-	// UpdateTTL extends the key's lifetime (e.g., from 5 min to 24h after success)
-	UpdateTTL(ctx context.Context, key string, ttl time.Duration) error
+	// UpdateTTL extends the lifetime of a tenant-scoped idempotency key
+	// (e.g., from 5min to 24h after successful delivery).
+	UpdateTTL(ctx context.Context, tenantID uuid.UUID, key string, ttl time.Duration) error
 
-	// Delete removes the key (used on failure to allow retry)
-	Delete(ctx context.Context, key string) error
+	// Delete removes a tenant-scoped idempotency key (used on failure to allow retry).
+	Delete(ctx context.Context, tenantID uuid.UUID, key string) error
 }

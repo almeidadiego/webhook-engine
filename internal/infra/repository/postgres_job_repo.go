@@ -105,7 +105,7 @@ func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, workerID u
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, idempotency_key, url, http_method,
+		RETURNING id, tenant_id, idempotency_key, url, http_method,
 		          request_headers, request_body, attempt_count, max_attempts`
 
 	rows, err := r.pool.Query(ctx, query, workerID, limit)
@@ -118,7 +118,7 @@ func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, workerID u
 	for rows.Next() {
 		var j domain.ScheduledJob
 		var headers []byte
-		err := rows.Scan(&j.ID, &j.IdempotencyKey, &j.URL, &j.HTTPMethod, &headers, &j.RequestBody, &j.AttemptCount, &j.MaxAttempts)
+		err := rows.Scan(&j.ID, &j.TenantID, &j.IdempotencyKey, &j.URL, &j.HTTPMethod, &headers, &j.RequestBody, &j.AttemptCount, &j.MaxAttempts)
 		if err != nil {
 			return nil, err
 		}

@@ -79,7 +79,7 @@ func (s *WorkerService) ExecuteCycle(ctx context.Context) {
 }
 
 func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
-	isDuplicate, err := s.cache.CheckAndSet(ctx, job.IdempotencyKey, 5*time.Minute)
+	isDuplicate, err := s.cache.CheckAndSet(ctx, job.TenantID, job.IdempotencyKey, 5*time.Minute)
 
 	if err != nil {
 		slog.Error("error accessing redis, releasing claim and aborting", "job_id", job.ID, "error", err)
@@ -131,7 +131,13 @@ func (s *WorkerService) sendRequest(ctx context.Context, job *domain.ScheduledJo
 	return s.httpClient.Do(req)
 }
 
-func (s *WorkerService) handleCompletion(ctx context.Context, job *domain.ScheduledJob, resp *http.Response, err error, exec *domain.ExecutionRecord) {
+func (s *WorkerService) handleCompletion(
+	ctx context.Context,
+	job *domain.ScheduledJob,
+	resp *http.Response,
+	err error,
+	exec *domain.ExecutionRecord,
+) {
 	now := time.Now()
 	exec.EndedAt = &now
 	duration := int(now.Sub(exec.StartedAt).Milliseconds())
@@ -197,30 +203,33 @@ func (s *WorkerService) handleCompletion(ctx context.Context, job *domain.Schedu
 		// We lost the claim race — another worker or the reaper changed the state
 		// before our write. Do NOT touch the idempotency key: the current owner
 		// will handle it. Rare by construction (reaper threshold > detachedCtx).
-		slog.Warn("lost claim race — state transition blocked by guard",
-			"job_id", job.ID, "target_status", job.Status)
+		slog.Warn(
+			"lost claim race — state transition blocked by guard",
+			"job_id", job.ID,
+			"target_status", job.Status,
+		)
 		return
 	}
 
 	// We own the claim: proceed with idempotency seal-or-release (P3 semantics).
-	s.sealOrReleaseIdempotencyKey(ctx, job.IdempotencyKey, resp, err)
+	s.sealOrReleaseIdempotencyKey(ctx, job.TenantID, job.IdempotencyKey, resp, err)
 }
 
 // sealOrReleaseIdempotencyKey transforms the 5min lock into a 24h seal on success,
 // or deletes it on failure to allow retries.
-func (s *WorkerService) sealOrReleaseIdempotencyKey(ctx context.Context, key string, resp *http.Response, err error) {
+func (s *WorkerService) sealOrReleaseIdempotencyKey(ctx context.Context, tenantID uuid.UUID, key string, resp *http.Response, err error) {
 	// On success (2xx), we transform the 5min lock into a 24h seal
 	if err == nil && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if err := s.cache.UpdateTTL(ctx, key, 24*time.Hour); err != nil {
-			slog.Error("error extending idempotency TTL", "key", key, "error", err)
+		if sealErr := s.cache.UpdateTTL(ctx, tenantID, key, 24*time.Hour); sealErr != nil {
+			slog.Error("error extending idempotency TTL", "tenant_id", tenantID, "key", key, "error", sealErr)
 		}
 		return
 	}
 
 	// On network error or status >= 400, we release the key for the next retry
 	// If Delete fails, the original 5 min TTL from CheckAndSet is our fallback.
-	if err := s.cache.Delete(ctx, key); err != nil {
-		slog.Warn("failed to delete redis lock (waiting for TTL)", "key", key, "error", err)
+	if deleteErr := s.cache.Delete(ctx, tenantID, key); deleteErr != nil {
+		slog.Warn("failed to delete redis lock (waiting for TTL)", "tenant_id", tenantID, "key", key, "error", deleteErr)
 	}
 }
 

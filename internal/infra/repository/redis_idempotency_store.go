@@ -3,9 +3,11 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -19,10 +21,18 @@ func NewRedisIdempotencyStore(client *redis.Client) *RedisIdempotencyStore {
 	}
 }
 
-func (s *RedisIdempotencyStore) CheckAndSet(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+// buildKey constructs a tenant-scoped idempotency key.
+// Format: "idemp:{tenantID}:{key}" — ensures keys from different tenants
+// with the same idempotency_key do not collide.
+func (s *RedisIdempotencyStore) buildKey(tenantID uuid.UUID, key string) string {
+	return fmt.Sprintf("idemp:%s:%s", tenantID.String(), key)
+}
+
+func (s *RedisIdempotencyStore) CheckAndSet(ctx context.Context, tenantID uuid.UUID, key string, ttl time.Duration) (bool, error) {
+	scopedKey := s.buildKey(tenantID, key)
 	cmd := s.Client.SetArgs(
 		ctx,
-		"idemp:"+key,
+		scopedKey,
 		"p",
 		redis.SetArgs{
 			Mode: "NX",
@@ -41,9 +51,10 @@ func (s *RedisIdempotencyStore) CheckAndSet(ctx context.Context, key string, ttl
 	return false, nil // successfully written
 }
 
-func (s *RedisIdempotencyStore) UpdateTTL(ctx context.Context, key string, ttl time.Duration) error {
+func (s *RedisIdempotencyStore) UpdateTTL(ctx context.Context, tenantID uuid.UUID, key string, ttl time.Duration) error {
 	const maxAttempts = 3
 	const retryInterval = 2 * time.Second
+	scopedKey := s.buildKey(tenantID, key)
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -52,7 +63,7 @@ func (s *RedisIdempotencyStore) UpdateTTL(ctx context.Context, key string, ttl t
 			return err
 		}
 
-		lastErr = s.Client.Expire(ctx, "idemp:"+key, ttl).Err()
+		lastErr = s.Client.Expire(ctx, scopedKey, ttl).Err()
 		if lastErr == nil {
 			return nil // success
 		}
@@ -79,9 +90,10 @@ func (s *RedisIdempotencyStore) UpdateTTL(ctx context.Context, key string, ttl t
 	return lastErr
 }
 
-func (s *RedisIdempotencyStore) Delete(ctx context.Context, key string) error {
+func (s *RedisIdempotencyStore) Delete(ctx context.Context, tenantID uuid.UUID, key string) error {
 	const maxAttempts = 3
 	const retryInterval = 2 * time.Second
+	scopedKey := s.buildKey(tenantID, key)
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -90,7 +102,7 @@ func (s *RedisIdempotencyStore) Delete(ctx context.Context, key string) error {
 			return err
 		}
 
-		lastErr = s.Client.Del(ctx, "idemp:"+key).Err()
+		lastErr = s.Client.Del(ctx, scopedKey).Err()
 		if lastErr == nil {
 			return nil // success
 		}
