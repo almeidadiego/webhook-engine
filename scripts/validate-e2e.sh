@@ -51,8 +51,11 @@ redis_cli() { docker exec webhook-redis redis-cli "$@" 2>/dev/null; }
 # ─── Cleanup ────────────────────────────────────────────────────────────────
 cleanup() {
     log "Cleaning up..."
-    # Kill worker binary (not go run wrapper) by process name
-    pkill -f "webhook-engine.*worker" 2>/dev/null || true
+    # Match the compiled binary /tmp/webhook-worker directly: the old pattern
+    # "webhook-engine.*worker" never matched it, leaving orphan workers that
+    # polluted subsequent scale tests with extra worker_ids.
+    pkill -f "webhook-worker" 2>/dev/null || true
+    pkill -f "cmd/worker" 2>/dev/null || true
     # Kill HTTP server
     pkill -f "dummy-server" 2>/dev/null || true
 }

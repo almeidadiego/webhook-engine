@@ -55,7 +55,10 @@ redis_cli() { docker exec webhook-redis redis-cli "$@" 2>/dev/null; }
 # ─── Cleanup ────────────────────────────────────────────────────────────────
 cleanup() {
     log "Cleaning up..."
-    pkill -f "webhook-engine.*worker" 2>/dev/null || true
+    pkill -f "webhook-worker" 2>/dev/null || true
+    pkill -f "cmd/worker" 2>/dev/null || true
+    pkill -f "go-build.*worker" 2>/dev/null || true
+    pkill -f "exe/worker" 2>/dev/null || true
     pkill -f "dummy-server" 2>/dev/null || true
 }
 trap cleanup EXIT
