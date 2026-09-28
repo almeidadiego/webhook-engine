@@ -155,7 +155,6 @@ stop_api() {
 
 stop_dummy() {
     pkill -f "dummy-server" 2>/dev/null || true
-    pkill -f "python3.*9999" 2>/dev/null || true
 }
 
 # ─── Cleanup ────────────────────────────────────────────────────────────────
@@ -183,7 +182,7 @@ sep
 # ─── Prerequisites ──────────────────────────────────────────────────────────
 command -v k6 >/dev/null 2>&1 || err "k6 is not installed or not on PATH (expected at /opt/homebrew/bin/k6)"
 command -v docker >/dev/null 2>&1 || err "docker is not installed or not on PATH"
-command -v python3 >/dev/null 2>&1 || err "python3 is not installed or not on PATH (needed by the dummy delivery counter)"
+command -v python3 >/dev/null 2>&1 || err "python3 is not installed or not on PATH (needed to parse the delivery counts JSON in the verification steps)"
 
 # ─── Step 1/6: Infrastructure ───────────────────────────────────────────────
 sep
@@ -226,9 +225,16 @@ log "Step 2/6: Starting dummy HTTP server (delay=${DUMMY_MIN_DELAY_MS}-${DUMMY_M
 # The delay is the donkey work of this experiment: it makes every delivery
 # occupy a semaphore slot for 1-2s, which under 50 VUs of pressure turns the
 # queue after the DB claim into a multi-second backlog.
+# The Go dummy server is concurrent by construction (one goroutine per request
+# in net/http), unlike the old single-threaded Python HTTPServer whose delayed
+# requests serialized and became the bottleneck of the experiment itself.
+# Binary name contains "dummy-server" so the cleanup pkill pattern matches it.
+log "Building dummy HTTP server binary..."
+go build -o /tmp/webhook-dummy-server ./cmd/dummy-server/
+DUMMY_PORT="${DUMMY_PORT}" \
 DUMMY_MIN_DELAY_MS="${DUMMY_MIN_DELAY_MS}" \
 DUMMY_MAX_DELAY_MS="${DUMMY_MAX_DELAY_MS}" \
-python3 scripts/dummy-server.py > /tmp/chaos-guard-dummy.log 2>&1 &
+/tmp/webhook-dummy-server > /tmp/chaos-guard-dummy.log 2>&1 &
 disown
 sleep 0.5
 

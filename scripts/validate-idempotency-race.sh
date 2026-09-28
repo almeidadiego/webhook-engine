@@ -42,7 +42,6 @@ cleanup() {
     pkill -f "go-build.*worker" 2>/dev/null || true
     pkill -f "webhook-worker" 2>/dev/null || true
     pkill -f "dummy-server" 2>/dev/null || true
-    pkill -f "python3.*9999" 2>/dev/null || true
     rm -f /tmp/webhook-deliveries.json
 }
 trap cleanup EXIT
@@ -98,8 +97,13 @@ log "Schema verified: scheduled_jobs + job_executions tables exist"
 
 # ─── Step 2: Start Dummy Server ─────────────────────────────────────────────
 sep
-log "Step 2/6: Starting dummy HTTP server on port 9999 (counts deliveries)..."
-python3 scripts/dummy-server.py &
+log "Step 2/6: Building + starting dummy HTTP server on port 9999 (counts deliveries)..."
+# The Go dummy server is concurrent by construction (one goroutine per request
+# in net/http), unlike the old single-threaded Python HTTPServer which
+# serialized delayed requests and became the bottleneck of load tests.
+# Binary name contains "dummy-server" so the cleanup pkill pattern matches it.
+go build -o /tmp/webhook-dummy-server ./cmd/dummy-server/
+/tmp/webhook-dummy-server &
 HTTP_PID=$!
 disown
 sleep 0.5
@@ -179,7 +183,6 @@ pkill -f "exe/worker" 2>/dev/null || true
     pkill -f "go-build.*worker" 2>/dev/null || true
 pkill -f "webhook-worker" 2>/dev/null || true
 pkill -f "dummy-server" 2>/dev/null || true
-pkill -f "python3.*9999" 2>/dev/null || true
 
 FINAL_STATUS=$(sql "SELECT status FROM scheduled_jobs WHERE id='${JOB_ID}';")
 FINAL_STATUS="${FINAL_STATUS// /}"

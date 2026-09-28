@@ -144,8 +144,13 @@ sep
 log "Step 5/6: Starting worker (will run for ${POLL_INTERVAL} poll interval)..."
 
 # The worker will POST to SEEDER_TARGET_URL — start a dummy server that counts deliveries
-log "Starting dummy HTTP server on port 9999 (counts deliveries)..."
-python3 scripts/dummy-server.py &
+log "Building + starting dummy HTTP server on port 9999 (counts deliveries)..."
+# The Go dummy server is concurrent by construction (one goroutine per request
+# in net/http), unlike the old single-threaded Python HTTPServer which
+# serialized delayed requests and became the bottleneck of load tests.
+# Binary name contains "dummy-server" so the cleanup pkill pattern matches it.
+go build -o /tmp/webhook-dummy-server ./cmd/dummy-server/
+/tmp/webhook-dummy-server &
 HTTP_PID=$!
 disown
 sleep 0.5

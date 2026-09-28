@@ -86,7 +86,6 @@ cleanup() {
     pkill -f "go-build.*worker" 2>/dev/null || true
     pkill -f "webhook-worker" 2>/dev/null || true
     pkill -f "dummy-server" 2>/dev/null || true
-    pkill -f "python3.*9999" 2>/dev/null || true
     # Result artifacts (k6-output, pool samples, summary JSON) are preserved
     # intentionally — they are the analysis deliverable of the load test.
     rm -f /tmp/api-load.log /tmp/worker-*-load.log /tmp/webhook-deliveries.json
@@ -145,10 +144,16 @@ rm -f /tmp/webhook-deliveries.json
 sep
 log "Step 2/4: Starting dummy server, API, and ${WORKER_COUNT} workers..."
 
-log "Starting dummy HTTP server on port ${DUMMY_PORT}..."
+log "Building + starting dummy HTTP server on port ${DUMMY_PORT}..."
+# The Go dummy server is concurrent by construction (one goroutine per request
+# in net/http), unlike the old single-threaded Python HTTPServer which
+# serialized delayed requests and became the bottleneck of load tests.
+# Binary name contains "dummy-server" so the cleanup pkill pattern matches it.
+go build -o /tmp/webhook-dummy-server ./cmd/dummy-server/
+DUMMY_PORT="${DUMMY_PORT}" \
 DUMMY_MIN_DELAY_MS="${DUMMY_MIN_DELAY_MS:-0}" \
 DUMMY_MAX_DELAY_MS="${DUMMY_MAX_DELAY_MS:-0}" \
-python3 scripts/dummy-server.py &
+/tmp/webhook-dummy-server &
 disown
 sleep 0.5
 

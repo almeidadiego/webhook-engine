@@ -151,8 +151,13 @@ log "Job has been stuck in 'processing' for 5 minutes — reaper should reclaim 
 sep
 log "Step 3/5: Starting worker with reaper (interval=${REAPER_INTERVAL}, threshold=${STALE_THRESHOLD})..."
 
-log "Starting dummy HTTP server on port 9999 (counts deliveries)..."
-python3 scripts/dummy-server.py &
+log "Building + starting dummy HTTP server on port 9999 (counts deliveries)..."
+# The Go dummy server is concurrent by construction (one goroutine per request
+# in net/http), unlike the old single-threaded Python HTTPServer which
+# serialized delayed requests and became the bottleneck of load tests.
+# Binary name contains "dummy-server" so the cleanup pkill pattern matches it.
+go build -o /tmp/webhook-dummy-server ./cmd/dummy-server/
+/tmp/webhook-dummy-server &
 HTTP_PID=$!
 disown
 sleep 0.5
