@@ -28,7 +28,15 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     last_response_status_code INT,
     last_error_message TEXT,
     last_response_body TEXT,
-    
+
+    -- External-world FACT that the webhook was delivered to the downstream.
+    -- Deliberately separate from `status` (internal control state): status is
+    -- claim-guarded and can be reset by the reaper, but delivery is a monotonic
+    -- real-world event (NULL -> timestamp) that must survive a lost claim race,
+    -- so a re-claim can skip re-delivery. No index needed: it's only read via
+    -- FetchNextPending, which already fetches by id.
+    delivered_at TIMESTAMPTZ,
+
     idempotency_key VARCHAR(255) NOT NULL,
     
     CONSTRAINT uq_tenant_idempotency UNIQUE (tenant_id, idempotency_key),

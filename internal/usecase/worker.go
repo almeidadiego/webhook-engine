@@ -79,6 +79,19 @@ func (s *WorkerService) ExecuteCycle(ctx context.Context) {
 }
 
 func (s *WorkerService) runJob(ctx context.Context, job *domain.ScheduledJob) {
+	if job.DeliveredAt != nil {
+		// The webhook was already delivered (possibly by a goroutine that lost the
+		// claim race). The fact survived in delivered_at; do not deliver again.
+		// We hold a fresh claim (status='processing'), so CompleteJob's guard passes.
+		slog.Info("job already delivered, skipping HTTP call",
+			"job_id", job.ID, "delivered_at", job.DeliveredAt)
+		job.Status = domain.StatusCompleted
+		if _, completeErr := s.repo.CompleteJob(ctx, job); completeErr != nil {
+			slog.Error("failed to complete already-delivered job", "job_id", job.ID, "error", completeErr)
+		}
+		return
+	}
+
 	isDuplicate, err := s.cache.CheckAndSet(ctx, job.TenantID, job.IdempotencyKey, 5*time.Minute)
 
 	if err != nil {
@@ -171,6 +184,14 @@ func (s *WorkerService) handleCompletion(
 		job.LastResponseCode = &resp.StatusCode
 		exec.ResponseStatusCode = &resp.StatusCode
 		slog.Info("job completed successfully", "job_id", job.ID)
+	}
+
+	// Record the delivery FACT before the guarded state transition, so it survives
+	// even if CompleteJob is blocked by a lost claim (defense in depth).
+	if !isError {
+		if markErr := s.repo.MarkDelivered(ctx, job.ID); markErr != nil {
+			slog.Error("failed to mark job as delivered", "job_id", job.ID, "error", markErr)
+		}
 	}
 
 	// Execution history is always attempted — it's valuable regardless of claim ownership.

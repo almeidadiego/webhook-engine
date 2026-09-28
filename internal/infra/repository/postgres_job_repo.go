@@ -106,7 +106,8 @@ func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, workerID u
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING id, tenant_id, idempotency_key, url, http_method,
-		          request_headers, request_body, attempt_count, max_attempts`
+		          request_headers, request_body, attempt_count, max_attempts,
+		          delivered_at`
 
 	rows, err := r.pool.Query(ctx, query, workerID, limit)
 	if err != nil {
@@ -118,7 +119,9 @@ func (r *PostgresJobRepository) FetchNextPending(ctx context.Context, workerID u
 	for rows.Next() {
 		var j domain.ScheduledJob
 		var headers []byte
-		err := rows.Scan(&j.ID, &j.TenantID, &j.IdempotencyKey, &j.URL, &j.HTTPMethod, &headers, &j.RequestBody, &j.AttemptCount, &j.MaxAttempts)
+		// delivered_at travels with the claim: if a previous goroutine already
+		// recorded the delivery fact, the new owner sees it and skips re-delivery.
+		err := rows.Scan(&j.ID, &j.TenantID, &j.IdempotencyKey, &j.URL, &j.HTTPMethod, &headers, &j.RequestBody, &j.AttemptCount, &j.MaxAttempts, &j.DeliveredAt)
 		if err != nil {
 			return nil, err
 		}
@@ -221,6 +224,21 @@ func (r *PostgresJobRepository) ReleaseClaim(ctx context.Context, job *domain.Sc
 		return false, err
 	}
 	return result.RowsAffected() > 0, nil
+}
+
+// MarkDelivered records the external-world fact that the webhook reached the
+// downstream. Unlike status transitions, this is NOT guarded: it is a monotonic
+// fact (NULL -> timestamp), idempotent via COALESCE (first write wins), and
+// independent of claim ownership. This is what survives a lost claim race.
+func (r *PostgresJobRepository) MarkDelivered(ctx context.Context, jobID uuid.UUID) error {
+	query := `
+		UPDATE scheduled_jobs
+		SET delivered_at = COALESCE(delivered_at, NOW()),
+		    updated_at = NOW()
+		WHERE id = $1`
+
+	_, err := r.pool.Exec(ctx, query, jobID)
+	return err
 }
 
 // SaveExecution saves detailed history to the job_executions table.

@@ -45,6 +45,12 @@ type JobRepository interface {
 	// SaveExecution saves detailed history to the job_executions table
 	SaveExecution(ctx context.Context, exec *ExecutionRecord) error
 
+	// MarkDelivered records the external-world fact that the webhook reached the
+	// downstream. Unlike status transitions, this is NOT guarded: it is a monotonic
+	// fact (NULL -> timestamp), idempotent via COALESCE (first write wins), and
+	// independent of claim ownership. This survives a lost claim race.
+	MarkDelivered(ctx context.Context, jobID uuid.UUID) error
+
 	// ReclaimStaleJobs finds jobs stuck in 'processing' status longer than staleThreshold
 	// and resets them to 'pending' for reprocessing. Uses FOR UPDATE SKIP LOCKED to safely
 	// cooperate with other reapers in multi-replica deployments.

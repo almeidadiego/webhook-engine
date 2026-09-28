@@ -67,10 +67,40 @@ O timing invariant (`reaper threshold` 60s > `detachedCtx` 45s) impede a corrida
 inteira — os guards são defesa em profundidade, não o mecanismo primário.
 O experimento derrotou o invariant de propósito para revelar o comportamento quando ele falha.
 
-## Melhoria futura (backlog)
+## Mitigação implementada: `delivered_at`
 
-Mitigação completa: coluna `delivered_at` no banco, escrita incondicionalmente no HTTP 2xx,
-permitindo que uma re-claim pule a entrega (fonte de verdade durável, independente da claim).
+O risco residual foi eliminado separando o **fato** ("o webhook chegou ao downstream")
+do **estado** (`status`). A coluna `delivered_at` é gravada incondicionalmente no HTTP 2xx
+(idempotente via `COALESCE`, independente da claim) e consultada na re-claim.
+
+### Resultado pós-mitigação (mesmo experimento)
+
+| Métrica | Sem `delivered_at` | Com `delivered_at` |
+|---|---|---|
+| `lost claim race` (target=completed) | 2 | 1 |
+| **Duplicatas** | **2** | **0** |
+| Distribuição de entregas | `{1: 2369, 2: 2}` | `{1: 2387}` |
+
+Cadeia causal do comportamento corrigido (job `71e0853b`):
+
+```
+10:15:18.154  delivered_at gravado (HTTP 2xx)
+              lost claim race — guard bloqueia o 'completed'
+10:15:19.718  "job already delivered, skipping HTTP call"  <- re-claim pula a entrega
+```
+
+O race ainda ocorreu (guard exercitado), mas o fato sobreviveu à perda da claim →
+a re-execução não reentregou. **Entrega exatamente uma vez no HTTP, mesmo quando o
+timing invariant falha.**
+
+## Três camadas de proteção
+
+| Camada | Registra | Papel |
+|---|---|---|
+| Redis key (`CheckAndSet`) | "tentativa em andamento" (TTL 5min) | Guard rápido |
+| CAS guard (`status='processing'`) | Transições de estado | Consistência do banco |
+| `delivered_at` (DB, permanente) | "entrega concluída" | Fonte de verdade da entrega |
+
 
 ## Artefatos
 

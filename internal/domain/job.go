@@ -35,6 +35,7 @@ type ScheduledJob struct {
 	LastResponseCode *int
 	LastErrorMessage *string
 	LastResponseBody []byte
+	DeliveredAt      *time.Time
 	IdempotencyKey   string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
