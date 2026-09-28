@@ -85,7 +85,10 @@ export default function () {
   const payload = JSON.stringify({
     tenant_id: '00000000-0000-0000-0000-000000000001',
     idempotency_key: idempotencyKey,
-    url: TARGET_URL,
+    // Append the idempotency key to the path so the downstream counter can
+    // distinguish jobs. Re-executions of the same job reuse the same key →
+    // the same path → the counter detects duplicate deliveries per job.
+    url: `${TARGET_URL}/${idempotencyKey}`,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
